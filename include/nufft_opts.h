@@ -30,6 +30,8 @@ typedef struct nufft_opts{    // defaults see finufft.cpp:finufft_default_opts()
   int maxbatchsize;       // (vectorized ntr>1 only): max transform batch, 0 auto
   int spread_nthr_atomic; // if >=0, threads above which spreader OMP critical goes atomic
   int spread_max_sp_size; // if >0, overrides spreader (dir=1) max subproblem size
+
+  int spreadinterponly;   // 0: NUFFT, 1: spread or interpolation only
   // sphinx tag (don't remove): @opts_end
 } nufft_opts;
 

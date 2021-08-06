@@ -96,21 +96,34 @@ int SET_NF_TYPE12(BIGINT ms, nufft_opts opts, spread_opts spopts, BIGINT *nf)
 // and requested number of Fourier modes ms. Returns 0 if success, else an
 // error code if nf was unreasonably big (& tell the world).
 {
-  *nf = (BIGINT)(opts.upsampfac*ms);       // manner of rounding not crucial
+  // for spread/interp only, we do not apply oversampling (Montalt 6/8/2021).
+  if (opts.spreadinterponly) {
+    *nf = ms;
+  } else {
+    *nf = (BIGINT)(opts.upsampfac*ms);       // manner of rounding not crucial
+  }
   if (*nf<2*spopts.nspread) *nf=2*spopts.nspread; // otherwise spread fails
   if (*nf<MAX_NF) {
     *nf = next235even(*nf);                       // expensive at huge nf
-    return 0;
   } else {
     fprintf(stderr,"[%s] nf=%.3g exceeds MAX_NF of %.3g, so exit without attempting even a malloc\n",__func__,(double)*nf,(double)MAX_NF);
     return ERR_MAXNALLOC;
   }
+  // for spread/interp only, make sure that the grid shape is valid
+  // (Montalt 6/8/2021).
+  if (opts.spreadinterponly && *nf != ms) {
+    fprintf(stderr,"[%s] ms=%d is not a valid grid size. It should be even, larger than the kernel (%d) and have no prime factors larger than 5.\n",__func__,ms,2*spopts.nspread);
+    return ERR_GRIDSIZE_NOTVALID;
+  }
+  return 0;
 }
 
 int setup_spreader_for_nufft(spread_opts &spopts, FLT eps, nufft_opts opts, int dim)
 // Set up the spreader parameters given eps, and pass across various nufft
 // options. Return status of setup_spreader. Uses pass-by-ref. Barnett 10/30/17
 {
+  // this must be set before calling setup_spreader
+  spopts.spreadinterponly = opts.spreadinterponly;
   // this calls spreadinterp.cpp...
   int ier = setup_spreader(spopts, eps, opts.upsampfac, opts.spread_kerevalmeth,
                            opts.spread_debug, opts.showwarn, dim);
@@ -400,7 +413,7 @@ void deconvolveshuffle3d(int dir,FLT prefac,FLT *ker1, FLT *ker2,
 
 // --------- batch helper functions for t1,2 exec: ---------------------------
 
-int spreadinterpSortedBatch(int batchSize, FINUFFT_PLAN p, CPX* cBatch)
+int spreadinterpSortedBatch(int batchSize, FINUFFT_PLAN p, CPX* cBatch, CPX* fBatch=NULL)
 /*
   Spreads (or interpolates) a batch of batchSize strength vectors in cBatch
   to (or from) the batch of fine working grids p->fwBatch, using the same set of
@@ -412,16 +425,23 @@ int spreadinterpSortedBatch(int batchSize, FINUFFT_PLAN p, CPX* cBatch)
      read from the start of cBatch (unlike Malleo). fwBatch also has zero offset
   2) this routine is a batched version of spreadinterpSorted in spreadinterp.cpp
   Barnett 5/19/20, based on Malleo 2019.
+  3) the 4th parameter is used when doing interp/spread only. When received,
+     input/output data is read/written from/to this pointer instead of from/to
+     the internal array p->fWBatch. Montalt 5/8/2021
 */
 {
   // opts.spread_thread: 1 sequential multithread, 2 parallel single-thread.
   // omp_sets_nested deprecated, so don't use; assume not nested for 2 to work.
   // But when nthr_outer=1 here, omp par inside the loop sees all threads...
   int nthr_outer = p->opts.spread_thread==1 ? 1 : batchSize;
+
+  if (fBatch == NULL) {
+    fBatch = (CPX*) p->fwBatch;
+  }
   
 #pragma omp parallel for num_threads(nthr_outer)
   for (int i=0; i<batchSize; i++) {
-    FFTW_CPX *fwi = p->fwBatch + i*p->nf;  // start of i'th fw array in wkspace
+    CPX *fwi = fBatch + i*p->nf;  // start of i'th fw array in wkspace
     CPX *ci = cBatch + i*p->nj;            // start of i'th c array in cBatch
     spreadinterpSorted(p->sortIndices, p->nf1, p->nf2, p->nf3, (FLT*)fwi, p->nj,
                        p->X, p->Y, p->Z, (FLT*)ci, p->spopts, p->didSort);
@@ -528,6 +548,7 @@ void FINUFFT_DEFAULT_OPTS(nufft_opts *o)
   o->maxbatchsize = 0;
   o->spread_nthr_atomic = -1;
   o->spread_max_sp_size = 0;
+  o->spreadinterponly = 0;
   // sphinx tag (don't remove): @defopts_end
 }
 
@@ -938,6 +959,38 @@ int FINUFFT_SETPTS(FINUFFT_PLAN p, BIGINT nj, FLT* xj, FLT* yj, FLT* zj,
   return 0;
 }
 // ............ end setpts ..................................................
+
+
+int FINUFFT_SPREADINTERP(FINUFFT_PLAN p, CPX* cj, CPX* fk) {
+
+  double t_sprint = 0.0, t_fft = 0.0, t_deconv = 0.0;  // accumulated timing
+
+  for (int b=0; b*p->batchSize < p->ntrans; b++) { // .....loop b over batches
+
+    // current batch is either batchSize, or possibly truncated if last one
+    int thisBatchSize = min(p->ntrans - b*p->batchSize, p->batchSize);
+    int bB = b*p->batchSize;         // index of vector, since batchsizes same
+    CPX* cjb = cj + bB*p->nj;        // point to batch of weights
+    CPX* fkb = fk + bB*p->N;         // point to batch of mode coeffs
+    if (p->opts.debug>1) printf("[%s] start batch %d (size %d):\n",__func__, b,thisBatchSize);
+    
+    spreadinterpSortedBatch(thisBatchSize, p, cjb, fkb);
+  }                                                   // ........end b loop
+  
+  return 0;
+}
+
+
+int FINUFFT_INTERP(FINUFFT_PLAN p, CPX* cj, CPX* fk) {
+    
+  return FINUFFT_SPREADINTERP(p, cj, fk);
+}
+
+
+int FINUFFT_SPREAD(FINUFFT_PLAN p, CPX* cj, CPX* fk) {
+
+  return FINUFFT_SPREADINTERP(p, cj, fk);
+}
 
 
 // EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE

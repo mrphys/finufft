@@ -35,7 +35,9 @@
 // (it could be argued these belong in finufft.h, but to avoid polluting
 //  user's name space we keep them here)
 // NB: if change these numbers, also must regen test/results/dumbinputs.refout
-#define WARN_EPS_TOO_SMALL       1
+#define WARN_EPS_TOO_SMALL       -1   // Montalt 6/8/2021 - cuFINUFFT uses 1 as
+                                      // as an error, so use negative numbers
+                                      // for warnings
 // this means that a fine grid array dim exceeded MAX_NF; no malloc tried...
 #define ERR_MAXNALLOC            2
 #define ERR_SPREAD_BOX_SMALL     3
@@ -50,7 +52,7 @@
 #define ERR_ALLOC                11
 #define ERR_DIM_NOTVALID         12
 #define ERR_SPREAD_THREAD_NOTVALID 13
-
+#define ERR_GRIDSIZE_NOTVALID    100
 
 
 // -------------- Math consts (not in math.h) and useful math macros ----------

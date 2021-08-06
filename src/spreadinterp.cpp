@@ -421,6 +421,13 @@ int spreadSorted(BIGINT* sort_indices,BIGINT N1, BIGINT N2, BIGINT N3,
       }     // end main loop over subprobs
       if (opts.debug) printf("\tt1 fancy spread: \t%.3g s (%d subprobs)\n",timer.elapsedsec(), nb);
     }   // end of choice of which t1 spread type to use
+
+    // in spread/interp only mode, apply scaling factor (Montalt 6/8/2021).
+    if (opts.spreadinterponly) {
+      for (BIGINT i=0; i<2*N; i++)
+        data_uniform[i] *= opts.ES_scale;
+    }
+
     return 0;
 };
 
@@ -519,7 +526,13 @@ int interpSorted(BIGINT* sort_indices,BIGINT N1, BIGINT N2, BIGINT N3,
 	  default: //can't get here
 	    break;
 	     
-	  }	 
+	  }
+
+    // in spread/interp only mode, apply scaling factor (Montalt 6/8/2021).
+    if (opts.spreadinterponly) {
+      target[0] *= opts.ES_scale;
+      target[1] *= opts.ES_scale;
+    }
       }
     } // end loop over targets in chunk
         
@@ -536,7 +549,26 @@ int interpSorted(BIGINT* sort_indices,BIGINT N1, BIGINT N2, BIGINT N3,
   return 0;
 };
 
-
+FLT calculate_scale_factor(const spread_opts &opts, int dim, FLT dummy = 0.0) {
+  // Calculates the scaling factor for spread/interp only mode (Montalt 6/8/2021).
+  // Dummy param is used to trigger float/double overloading and avoid
+  // redefinition errors.
+  BIGINT n = 100;
+  FLT h = 2.0 / n;
+  FLT x = -1.0;
+  FLT sum = 0.0;
+  for(BIGINT i = 1; i < n; i++) {
+    x += h;
+    sum += exp(opts.ES_beta * sqrt(1.0 - x * x));
+  }
+  sum += 1.0;
+  sum *= h;
+  sum *= sqrt(1.0 / opts.ES_c);
+  FLT scale = sum;
+  if (dim > 1) { scale *= sum; }
+  if (dim > 2) { scale *= sum; }
+  return 1.0 / scale;
+}
 
 ///////////////////////////////////////////////////////////////////////////
 
@@ -624,7 +656,9 @@ int setup_spreader(spread_opts &opts, FLT eps, double upsampfac,
   opts.ES_beta = betaoverns * (FLT)ns;    // set the kernel beta parameter
   if (debug)
     printf("%s (kerevalmeth=%d) eps=%.3g sigma=%.3g: chose ns=%d beta=%.3g\n",__func__,kerevalmeth,(double)eps,upsampfac,ns,(double)opts.ES_beta);
-  
+  // calculate scaling factor for spread/interp only mode (Montalt 6/8/2021).
+  if (opts.spreadinterponly)
+    opts.ES_scale = calculate_scale_factor(opts, dim);
   return ier;
 }
 
@@ -677,7 +711,7 @@ static inline void evaluate_kernel_vector(FLT *ker, FLT *args, const spread_opts
       ker[i] = b * sqrt(1.0 - c*args[i]*args[i]);
     }
     if (!(opts.flags & TF_OMIT_EVALUATE_EXPONENTIAL))
-      for (int i = 0; i < Npad; i++) // Loop 2: Compute exponentials
+      for (int i = 0; i < Npad; i++) // Loop 2: Compute exponentials 
 	ker[i] = exp(ker[i]);
   } else {
     for (int i = 0; i < N; i++)             // dummy for timing only
